@@ -22,6 +22,8 @@ REFILL_TEXT = "Refill"
 THRESHOLD_MB = 800
 
 STATE_FILE = "/tmp/tplink_monitor.state"
+SMS_COUNTER_FILE = "/tmp/tplink_sms_counter.state"
+MAX_SMS_PER_DAY = 25
 LOCK_FILE = "/tmp/tplink_monitor.lock"
 LOCK_STALE_SEC = 25
 NET_TIMEOUT_SEC = 8
@@ -32,8 +34,7 @@ SYSLOG_TAG = "tplink-monitor"
 
 ACT_GET, ACT_SET, ACT_DEL, ACT_GL, ACT_GS, ACT_CGI = 1, 2, 4, 5, 6, 8
 
-def syslog(level: str, message: str):
-    """level: 'info' | 'warning' | 'err'."""
+def syslog(level, message):
     prio = {"info": "daemon.info", "warning": "daemon.warning", "err": "daemon.err"}.get(level, "daemon.info")
     try:
         os.spawnvp(os.P_WAIT, "logger", ["logger", "-t", SYSLOG_TAG, "-p", prio, message])
@@ -409,7 +410,6 @@ class HttpClient:
         req_lines.append("")
         req_bytes = "\r\n".join(req_lines).encode("utf-8") + body
 
-        # Connect directly without getaddrinfo (avoids the idna codec)
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.timeout)
         try:
@@ -528,7 +528,6 @@ class TPLinkClient:
         sign_plain = f"key={self.key_str}&iv={self.iv_str}&h={self.hash}&s={self.seq + len(enc_login)}"
         sign_login = rsa_enc(sign_plain, self.nn, self.ee)
 
-        # Escape only = and +; do not escape slashes /
         enc_url = enc_login.replace("=", "%3D").replace("+", "%2B")
         path = f"/cgi/login?data={enc_url}&sign={sign_login}&Action=1&LoginStatus=0"
 
@@ -572,8 +571,7 @@ class TPLinkClient:
         parsed = from_data_frame(decrypted)
         return parsed
 
-    def get_total_used_mb(self) -> float:
-        # Request both blocks as in the working code
+    def get_total_used_mb(self):
         reqs = [
             {"method": ACT_GL, "controller": "WAN_LTE_INTF_CFG", "attrs": []},
             {"method": ACT_GL, "controller": "WAN_COMMON_INTF_CFG", "attrs": ["WANAccessType"]},
@@ -627,6 +625,42 @@ def write_state(baseline_mb: float):
         f.write(f"updated={time.strftime('%Y-%m-%dT%H:%M:%S')}\n")
     os.replace(tmp_path, STATE_FILE)
 
+def read_sms_counter():
+    try:
+        with open(SMS_COUNTER_FILE, "r") as f:
+            content = f.read()
+        m_date = re.search(r"date=(\d{4}-\d{2}-\d{2})", content)
+        m_count = re.search(r"count=(\d+)", content)
+        if m_date and m_count:
+            return m_date.group(1), int(m_count.group(1))
+    except FileNotFoundError:
+        pass
+    return None, 0
+
+def write_sms_counter(date_str, count):
+    tmp_path = SMS_COUNTER_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(f"date={date_str}\n")
+        f.write(f"count={count}\n")
+    os.replace(tmp_path, SMS_COUNTER_FILE)
+
+def check_sms_limit():
+    today = time.strftime("%Y-%m-%d")
+    saved_date, count = read_sms_counter()
+    if saved_date != today:
+        write_sms_counter(today, 0)
+        return True
+    if count >= MAX_SMS_PER_DAY:
+        return False
+    return True
+
+def increment_sms_counter():
+    today = time.strftime("%Y-%m-%d")
+    saved_date, count = read_sms_counter()
+    if saved_date != today:
+        write_sms_counter(today, 1)
+    else:
+        write_sms_counter(today, count + 1)
 
 def acquire_lock() -> bool:
     try:
@@ -681,6 +715,11 @@ def main():
         return
 
     try:
+        if not check_sms_limit():
+            _, count = read_sms_counter()
+            syslog("warning", f"Daily SMS limit reached ({count}/{MAX_SMS_PER_DAY}). Skipping this run.")
+            return
+
         client = TPLinkClient()
 
         current_mb, err = with_retries(client.get_total_used_mb, "get usage")
@@ -695,6 +734,7 @@ def main():
             if err:
                 syslog("err", err)
                 return
+            increment_sms_counter()
             write_state(current_mb)
             syslog("info", f"First run: initial Refill SMS sent. Total used={current_mb:.2f} MB, baseline set.")
             return
@@ -711,8 +751,10 @@ def main():
             if err:
                 syslog("err", f"{err}. Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), baseline NOT reset, will retry next run.")
                 return
+            increment_sms_counter()
             write_state(current_mb)
-            syslog("info", f"Threshold reached ({used_since_refill:.2f} MB >= {THRESHOLD_MB} MB). Refill SMS sent, baseline reset to {current_mb:.2f} MB.")
+            _, count = read_sms_counter()
+            syslog("info", f"Threshold reached ({used_since_refill:.2f} MB >= {THRESHOLD_MB} MB). Refill SMS sent, baseline reset to {current_mb:.2f} MB. SMS today: {count}/{MAX_SMS_PER_DAY}.")
         else:
             syslog("info", f"Total used={current_mb:.2f} MB, used since last Refill={used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB). No action.")
     except Exception as e:

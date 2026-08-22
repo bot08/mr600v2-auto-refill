@@ -24,6 +24,8 @@ REFILL_TEXT = "Refill"
 THRESHOLD_MB = 800
 
 STATE_FILE = "/tmp/tplink_monitor.state"
+SMS_COUNTER_FILE = "/tmp/tplink_sms_counter.state"
+MAX_SMS_PER_DAY = 25
 LOCK_FILE = "/tmp/tplink_monitor.lock"
 LOCK_STALE_SEC = 25
 NET_TIMEOUT_SEC = 8
@@ -670,6 +672,52 @@ def write_state(baseline_mb: float):
     os.replace(tmp_path, STATE_FILE)
 
 
+def read_sms_counter():
+    # Read daily SMS counter. Returns (date_str, count)
+    try:
+        with open(SMS_COUNTER_FILE, "r") as f:
+            content = f.read()
+        m_date = re.search(r"date=(\d{4}-\d{2}-\d{2})", content)
+        m_count = re.search(r"count=(\d+)", content)
+        if m_date and m_count:
+            return m_date.group(1), int(m_count.group(1))
+    except FileNotFoundError:
+        pass
+    return None, 0
+
+
+def write_sms_counter(date_str: str, count: int):
+    # Write daily SMS counter atomically
+    tmp_path = SMS_COUNTER_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(f"date={date_str}\n")
+        f.write(f"count={count}\n")
+    os.replace(tmp_path, SMS_COUNTER_FILE)
+
+
+def check_sms_limit() -> bool:
+    # Check if daily SMS limit is reached. Returns True if SMS can be sent.
+    today = time.strftime("%Y-%m-%d")
+    saved_date, count = read_sms_counter()
+    if saved_date != today:
+        # New day — reset counter
+        write_sms_counter(today, 0)
+        return True
+    if count >= MAX_SMS_PER_DAY:
+        return False
+    return True
+
+
+def increment_sms_counter():
+    # Increment SMS counter for today.
+    today = time.strftime("%Y-%m-%d")
+    saved_date, count = read_sms_counter()
+    if saved_date != today:
+        write_sms_counter(today, 1)
+    else:
+        write_sms_counter(today, count + 1)
+
+
 def acquire_lock() -> bool:
     try:
         fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -728,6 +776,12 @@ def main():
         return
 
     try:
+        # Check daily SMS limit before doing anything
+        if not check_sms_limit():
+            _, count = read_sms_counter()
+            syslog("warning", f"Daily SMS limit reached ({count}/{MAX_SMS_PER_DAY}). Skipping this run.")
+            return
+
         client = TPLinkClient()
 
         current_mb, err = with_retries(client.get_total_used_mb, "get usage")
@@ -742,6 +796,7 @@ def main():
             if err:
                 syslog("err", err)
                 return
+            increment_sms_counter()
             write_state(current_mb)
             syslog("info", f"First run: initial Refill SMS sent. Total used={current_mb:.2f} MB, baseline set.")
             return
@@ -758,8 +813,10 @@ def main():
             if err:
                 syslog("err", f"{err}. Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), baseline NOT reset, will retry next run.")
                 return
+            increment_sms_counter()
             write_state(current_mb)
-            syslog("info", f"Threshold reached ({used_since_refill:.2f} MB >= {THRESHOLD_MB} MB). Refill SMS sent, baseline reset to {current_mb:.2f} MB.")
+            _, count = read_sms_counter()
+            syslog("info", f"Threshold reached ({used_since_refill:.2f} MB >= {THRESHOLD_MB} MB). Refill SMS sent, baseline reset to {current_mb:.2f} MB. SMS today: {count}/{MAX_SMS_PER_DAY}.")
         else:
             syslog("info", f"Total used={current_mb:.2f} MB, used since last Refill={used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB). No action.")
     except Exception as e:
