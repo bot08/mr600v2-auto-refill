@@ -779,6 +779,6 @@ EOF
 
 chmod +x /root/tplink_auto_refill.sh
 
-(crontab -l 2>/dev/null | grep -Fv "/root/auto_refill.sh"; echo "* * * * * /root/tplink_auto_refill.sh") | crontab -
+(crontab -l 2>/dev/null | grep -Fv "tplink_auto_refill.sh"; echo "* * * * * /root/tplink_auto_refill.sh") | crontab -
 
 /etc/init.d/cron restart
