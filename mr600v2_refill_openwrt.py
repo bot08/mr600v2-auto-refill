@@ -796,6 +796,9 @@ def main():
             if err:
                 syslog("err", err)
                 return
+            if not ok:
+                syslog("err", "First run: router rejected Refill SMS (error != 0). Not counted, baseline not set, will retry next run.")
+                return
             increment_sms_counter()
             write_state(current_mb)
             syslog("info", f"First run: initial Refill SMS sent. Total used={current_mb:.2f} MB, baseline set.")
@@ -812,6 +815,9 @@ def main():
             ok, err = with_retries(lambda: client.send_sms(REFILL_NUMBER, REFILL_TEXT), "send Refill SMS")
             if err:
                 syslog("err", f"{err}. Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), baseline NOT reset, will retry next run.")
+                return
+            if not ok:
+                syslog("err", f"Router rejected Refill SMS (error != 0). Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), not counted, baseline NOT reset, will retry next run.")
                 return
             increment_sms_counter()
             write_state(current_mb)
