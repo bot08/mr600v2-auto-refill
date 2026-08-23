@@ -25,7 +25,7 @@ THRESHOLD_MB = 800
 
 STATE_FILE = "/tmp/tplink_monitor.state"
 SMS_COUNTER_FILE = "/tmp/tplink_sms_counter.state"
-MAX_SMS_PER_DAY = 25
+MAX_SMS_PER_DAY = 30
 LOCK_FILE = "/tmp/tplink_monitor.lock"
 LOCK_STALE_SEC = 25
 NET_TIMEOUT_SEC = 8
