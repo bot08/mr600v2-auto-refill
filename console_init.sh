@@ -25,8 +25,8 @@ STATE_FILE = "/tmp/tplink_monitor.state"
 SMS_COUNTER_FILE = "/tmp/tplink_sms_counter.state"
 MAX_SMS_PER_DAY = 30
 LOCK_FILE = "/tmp/tplink_monitor.lock"
-LOCK_STALE_SEC = 20
-NET_TIMEOUT_SEC = 8
+LOCK_STALE_SEC = 15
+NET_TIMEOUT_SEC = 5
 MAX_ATTEMPTS = 2
 RETRY_DELAY_SEC = 2
 
@@ -776,9 +776,9 @@ EOF
 cat > /root/tplink_auto_refill.sh << 'EOF'
 #!/bin/sh
 if ping -c 1 -W 2 192.168.1.1 >/dev/null 2>&1; then
-    ( sleep 20; /usr/bin/python3 /root/tplink_router_monitor.py ) &
-    ( sleep 40; /usr/bin/python3 /root/tplink_router_monitor.py ) &
-    ( sleep 60; /usr/bin/python3 /root/tplink_router_monitor.py ) &
+    ( /usr/bin/python3 /root/tplink_router_monitor.py ) &
+    ( sleep 30; /usr/bin/python3 /root/tplink_router_monitor.py ) &
+    # ( sleep 40; /usr/bin/python3 /root/tplink_router_monitor.py ) &
     wait
 fi
 EOF
