@@ -26,6 +26,8 @@ THRESHOLD_MB = 800
 STATE_FILE = "/tmp/tplink_monitor.state"
 SMS_COUNTER_FILE = "/tmp/tplink_sms_counter.state"
 MAX_SMS_PER_DAY = 30
+SESSION_FILE = "/tmp/tplink_session.state"
+SESSION_MAX_AGE_SEC = 240
 LOCK_FILE = "/tmp/tplink_monitor.lock"
 LOCK_STALE_SEC = 20
 NET_TIMEOUT_SEC = 8
@@ -647,6 +649,19 @@ class TPLinkClient:
         result = self.execute(reqs)
         return result.get("error") == 0
 
+    def restore_session(self, session_data):
+        # Restore a previously saved session to skip login
+        self.token = session_data.get("token", "")
+        self.key_str = session_data.get("key_str", "")
+        self.iv_str = session_data.get("iv_str", "")
+        self.key_b = self.key_str.encode("utf-8")
+        self.iv_b = self.iv_str.encode("utf-8")
+        self.nn = session_data.get("nn", "")
+        self.ee = session_data.get("ee", "")
+        self.seq = int(session_data.get("seq", "0"))
+        self.hash = session_data.get("hash", "")
+        self.http.cookies = session_data.get("cookies", {})
+
 
 # ============================================================================
 # State management (/tmp) and locking
@@ -718,6 +733,54 @@ def increment_sms_counter():
         write_sms_counter(today, count + 1)
 
 
+def save_session(client):
+    # Save session state to file for reuse between runs
+    tmp_path = SESSION_FILE + ".tmp"
+    with open(tmp_path, "w") as f:
+        f.write(f"token={client.token}\n")
+        f.write(f"key_str={client.key_str}\n")
+        f.write(f"iv_str={client.iv_str}\n")
+        f.write(f"nn={client.nn}\n")
+        f.write(f"ee={client.ee}\n")
+        f.write(f"seq={client.seq}\n")
+        f.write(f"hash={client.hash}\n")
+        for k, v in client.http.cookies.items():
+            f.write(f"cookie_{k}={v}\n")
+    os.replace(tmp_path, SESSION_FILE)
+
+
+def load_session():
+    # Load session if file exists and is younger than SESSION_MAX_AGE_SEC
+    try:
+        age = time.time() - os.path.getmtime(SESSION_FILE)
+        if age > SESSION_MAX_AGE_SEC:
+            return None
+        with open(SESSION_FILE, "r") as f:
+            content = f.read()
+        data = {}
+        cookies = {}
+        for line in content.strip().splitlines():
+            if "=" in line:
+                k, v = line.split("=", 1)
+                if k.startswith("cookie_"):
+                    cookies[k[7:]] = v
+                else:
+                    data[k] = v
+        data["cookies"] = cookies
+        if data.get("token"):
+            return data
+    except (FileNotFoundError, OSError):
+        pass
+    return None
+
+
+def delete_session():
+    try:
+        os.remove(SESSION_FILE)
+    except OSError:
+        pass
+
+
 def acquire_lock() -> bool:
     try:
         fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
@@ -776,18 +839,30 @@ def main():
         return
 
     try:
-        # Check daily SMS limit before doing anything
+        # Check DAILY SMS limit before doing anything
         if not check_sms_limit():
             _, count = read_sms_counter()
             syslog("warning", f"Daily SMS limit reached ({count}/{MAX_SMS_PER_DAY}). Skipping this run.")
             return
 
+        # Try to reuse a cached session
+        session = load_session()
+
         client = TPLinkClient()
+
+        if session:
+            client.restore_session(session)
 
         current_mb, err = with_retries(client.get_total_used_mb, "get usage")
         if err:
             syslog("err", err)
+            if session:
+                delete_session()
             return
+
+        # Save session after successful API call (login may have happened)
+        if not session:
+            save_session(client)
 
         baseline_mb = read_state()
 
@@ -795,6 +870,7 @@ def main():
             ok, err = with_retries(lambda: client.send_sms(REFILL_NUMBER, REFILL_TEXT), "send initial SMS")
             if err:
                 syslog("err", err)
+                delete_session()
                 return
             if not ok:
                 syslog("err", "First run: router rejected Refill SMS (error != 0). Not counted, baseline not set, will retry next run.")
@@ -815,6 +891,7 @@ def main():
             ok, err = with_retries(lambda: client.send_sms(REFILL_NUMBER, REFILL_TEXT), "send Refill SMS")
             if err:
                 syslog("err", f"{err}. Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), baseline NOT reset, will retry next run.")
+                delete_session()
                 return
             if not ok:
                 syslog("err", f"Router rejected Refill SMS (error != 0). Used {used_since_refill:.2f} MB (threshold {THRESHOLD_MB} MB), not counted, baseline NOT reset, will retry next run.")
