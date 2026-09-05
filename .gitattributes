@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Router scripts must keep LF endings - CRLF breaks the busybox shebang.
+*.sh text eol=lf
+*.awk text eol=lf
