@@ -147,6 +147,14 @@ def _gmul(a, b):
     return p & 0xff
 
 
+_MUL2 = [_gmul(x, 2) for x in range(256)]
+_MUL3 = [_gmul(x, 3) for x in range(256)]
+_MUL9 = [_gmul(x, 9) for x in range(256)]
+_MUL11 = [_gmul(x, 11) for x in range(256)]
+_MUL13 = [_gmul(x, 13) for x in range(256)]
+_MUL14 = [_gmul(x, 14) for x in range(256)]
+
+
 def _key_expansion(key):
     nk = len(key) // 4
     nr = nk + 6
@@ -189,19 +197,19 @@ def _inv_shift_rows(state):
 def _mix_columns(state):
     for c in range(4):
         a = [state[r][c] for r in range(4)]
-        state[0][c] = _gmul(a[0], 2) ^ _gmul(a[1], 3) ^ a[2] ^ a[3]
-        state[1][c] = a[0] ^ _gmul(a[1], 2) ^ _gmul(a[2], 3) ^ a[3]
-        state[2][c] = a[0] ^ a[1] ^ _gmul(a[2], 2) ^ _gmul(a[3], 3)
-        state[3][c] = _gmul(a[0], 3) ^ a[1] ^ a[2] ^ _gmul(a[3], 2)
+        state[0][c] = _MUL2[a[0]] ^ _MUL3[a[1]] ^ a[2] ^ a[3]
+        state[1][c] = a[0] ^ _MUL2[a[1]] ^ _MUL3[a[2]] ^ a[3]
+        state[2][c] = a[0] ^ a[1] ^ _MUL2[a[2]] ^ _MUL3[a[3]]
+        state[3][c] = _MUL3[a[0]] ^ a[1] ^ a[2] ^ _MUL2[a[3]]
 
 
 def _inv_mix_columns(state):
     for c in range(4):
         a = [state[r][c] for r in range(4)]
-        state[0][c] = _gmul(a[0], 14) ^ _gmul(a[1], 11) ^ _gmul(a[2], 13) ^ _gmul(a[3], 9)
-        state[1][c] = _gmul(a[0], 9) ^ _gmul(a[1], 14) ^ _gmul(a[2], 11) ^ _gmul(a[3], 13)
-        state[2][c] = _gmul(a[0], 13) ^ _gmul(a[1], 9) ^ _gmul(a[2], 14) ^ _gmul(a[3], 11)
-        state[3][c] = _gmul(a[0], 11) ^ _gmul(a[1], 13) ^ _gmul(a[2], 9) ^ _gmul(a[3], 14)
+        state[0][c] = _MUL14[a[0]] ^ _MUL11[a[1]] ^ _MUL13[a[2]] ^ _MUL9[a[3]]
+        state[1][c] = _MUL9[a[0]] ^ _MUL14[a[1]] ^ _MUL11[a[2]] ^ _MUL13[a[3]]
+        state[2][c] = _MUL13[a[0]] ^ _MUL9[a[1]] ^ _MUL14[a[2]] ^ _MUL11[a[3]]
+        state[3][c] = _MUL11[a[0]] ^ _MUL13[a[1]] ^ _MUL9[a[2]] ^ _MUL14[a[3]]
 
 
 def _b2s(b):
@@ -485,6 +493,7 @@ class TPLinkClient:
         self.iv_str = str(micros + random.randint(0, 999))[:16]
         self.key_b = self.key_str.encode("utf-8")
         self.iv_b = self.iv_str.encode("utf-8")
+        self._aes_w, self._aes_nr = _key_expansion(self.key_b)
 
         self.hash = md5_hex(f"{self.username}{self.password}")
         self.nn = ""
@@ -494,16 +503,29 @@ class TPLinkClient:
 
     def _aes_enc(self, pt: str) -> str:
         padded = _pkcs7_pad(pt.encode("utf-8"), 16)
-        enc = aes_cbc_encrypt(padded, self.key_b, self.iv_b)
-        return binascii.b2a_base64(enc).decode("utf-8").strip()
+        out = b""
+        prev = self.iv_b
+        for i in range(0, len(padded), 16):
+            block = bytes(a ^ b for a, b in zip(padded[i:i + 16], prev))
+            enc = _aes_encrypt_block(block, self._aes_w, self._aes_nr)
+            out += enc
+            prev = enc
+        return binascii.b2a_base64(out).decode("utf-8").strip()
 
     def _aes_dec(self, b64: str) -> str:
         clean = b64.strip()
         if clean.startswith("<") or clean.startswith("{"):
             return f"[Non-AES: {clean[:150]}]"
         try:
-            raw = aes_cbc_decrypt(binascii.a2b_base64(clean), self.key_b, self.iv_b)
-            return _pkcs7_unpad(raw).decode("utf-8", errors="ignore")
+            ciphertext = binascii.a2b_base64(clean)
+            out = b""
+            prev = self.iv_b
+            for i in range(0, len(ciphertext), 16):
+                block = ciphertext[i:i + 16]
+                dec = _aes_decrypt_block(block, self._aes_w, self._aes_nr)
+                out += bytes(a ^ b for a, b in zip(dec, prev))
+                prev = block
+            return _pkcs7_unpad(out).decode("utf-8", errors="ignore")
         except Exception as e:
             return f"[Decryption Error: {e}]"
 
